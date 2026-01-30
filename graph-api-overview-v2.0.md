@@ -1,7 +1,3 @@
-> ## Documentation Index
-> Fetch the complete documentation index at: https://docs.langchain.com/llms.txt
-> Use this file to discover all available pages before exploring further.
-
 # Graph API overview
 
 ## Graphs
@@ -14,13 +10,23 @@ At its core, LangGraph models agent workflows as graphs. You define the behavior
 
 3. [`Edges`](#edges): Functions that determine which `Node` to execute next based on the current state. They can be conditional branches or fixed transitions.
 
-By composing `Nodes` and `Edges`, you can create complex, looping workflows that evolve the state over time. The real power, though, comes from how LangGraph manages that state.
+By composing `Nodes` and `Edges`, you can create complex, looping workflows that evolve the state over time. LangGraph's value lies in how it manages that state across execution steps.
 
-To emphasize: `Nodes` and `Edges` are nothing more than functions – they can contain an LLM or just good ol' code.
+To emphasize: nodes and edges are just Python functions—they can invoke an LLM or execute arbitrary logic.
 
-In short: *nodes do the work, edges tell what to do next*.
+In short: *nodes do the work, edges tell the graph what to do next*.
 
-LangGraph's underlying graph algorithm uses [message passing](https://en.wikipedia.org/wiki/Message_passing) to define a general program. When a Node completes its operation, it sends messages along one or more edges to other node(s). These recipient nodes then execute their functions, pass the resulting messages to the next set of nodes, and the process continues. Inspired by Google's [Pregel](https://research.google/pubs/pregel-a-system-for-large-scale-graph-processing/) system, the program proceeds in discrete "super-steps."
+### Quick reference
+
+| Component | Purpose | Key API |
+|-----------|---------|---------|
+| State | Shared data structure | `TypedDict`, `Pydantic` |
+| Nodes | Logic functions | `add_node()` |
+| Edges | Routing logic | `add_edge()`, `add_conditional_edges()` |
+| Command | Combined state update + routing | `Command(update=..., goto=...)` |
+| Send | Dynamic parallel execution | `Send(node_name, state)` |
+
+LangGraph's underlying graph algorithm uses [message passing](https://en.wikipedia.org/wiki/Message_passing) to define a general program. When a node completes its operation, it sends messages along one or more edges to other nodes. These recipient nodes then execute their functions, pass the resulting messages to the next set of nodes, and the process continues. Inspired by Google's [Pregel](https://research.google/pubs/pregel-a-system-for-large-scale-graph-processing/) system, the program proceeds in discrete "super-steps."
 
 A super-step can be considered a single iteration over the graph nodes. Nodes that run in parallel are part of the same super-step, while nodes that run sequentially belong to separate super-steps. At the start of graph execution, all nodes begin in an `inactive` state. A node becomes `active` when it receives a new message (state) on any of its incoming edges (or "channels"). The active node then runs its function and responds with updates. At the end of each super-step, nodes with no incoming messages vote to `halt` by marking themselves as `inactive`. The graph execution terminates when all nodes are `inactive` and no messages are in transit.
 
@@ -30,9 +36,9 @@ The [`StateGraph`](https://reference.langchain.com/python/langgraph/graphs/#lang
 
 ### Compiling your graph
 
-To build your graph, you first define the [state](#state), you then add [nodes](#nodes) and [edges](#edges), and then you compile it. What exactly is compiling your graph and why is it needed?
+To build your graph, define the [state](#state), add [nodes](#nodes) and [edges](#edges), then compile. What exactly is compiling your graph and why is it needed?
 
-Compiling is a pretty simple step. It provides a few basic checks on the structure of your graph (no orphaned nodes, etc). It is also where you can specify runtime args like [checkpointers](/oss/python/langgraph/persistence) and breakpoints. You compile your graph by just calling the `.compile` method:
+Compiling is a simple step. It validates graph structure (e.g., no orphaned nodes, valid edge targets) and binds runtime configuration like [checkpointers](/oss/python/langgraph/persistence) and breakpoints. You compile your graph by just calling the `.compile` method:
 
 ```python  theme={null}
 graph = graph_builder.compile(...)
@@ -44,11 +50,11 @@ graph = graph_builder.compile(...)
 
 ## State
 
-The first thing you do when you define a graph is define the `State` of the graph. The `State` consists of the [schema of the graph](#schema) as well as [`reducer` functions](#reducers) which specify how to apply updates to the state. The schema of the `State` will be the input schema to all `Nodes` and `Edges` in the graph, and can be either a `TypedDict` or a `Pydantic` model. All `Nodes` will emit updates to the `State` which are then applied using the specified `reducer` function.
+When defining a graph, you start by defining its `State`. The `State` consists of the [schema of the graph](#schema) as well as [`reducer` functions](#reducers) which specify how to apply updates to the state. The schema of the `State` will be the input schema to all `Nodes` and `Edges` in the graph, and can be either a `TypedDict` or a `Pydantic` model. All `Nodes` will emit updates to the `State` which are then applied using the specified `reducer` function.
 
 ### Schema
 
-The main documented way to specify the schema of a graph is by using a [`TypedDict`](https://docs.python.org/3/library/typing.html#typing.TypedDict). If you want to provide default values in your state, use a [`dataclass`](https://docs.python.org/3/library/dataclasses.html). We also support using a Pydantic [`BaseModel`](/oss/python/langgraph/use-graph-api#use-pydantic-models-for-graph-state) as your graph state if you want recursive data validation (though note that Pydantic is less performant than a `TypedDict` or `dataclass`).
+The recommended way to specify schema is with a [`TypedDict`](https://docs.python.org/3/library/typing.html#typing.TypedDict). If you want to provide default values in your state, use a [`dataclass`](https://docs.python.org/3/library/dataclasses.html). We also support using a Pydantic [`BaseModel`](/oss/python/langgraph/use-graph-api#use-pydantic-models-for-graph-state) as your graph state if you want recursive data validation (though note that Pydantic is less performant than a `TypedDict` or `dataclass`).
 
 By default, the graph will have the same input and output schemas. If you want to change this, you can also specify explicit input and output schemas directly. This is useful when you have a lot of keys, and some are explicitly for input and others for output. See the [guide](/oss/python/langgraph/use-graph-api#define-input-and-output-schemas) for more information.
 
@@ -106,23 +112,12 @@ graph.invoke({"user_input":"My"})
 # {'graph_output': 'My name is Lance'}
 ```
 
-There are two subtle and important points to note here:
+<Note>
+Two important behaviors to understand:
 
-1. We pass `state: InputState` as the input schema to `node_1`. But, we write out to `foo`, a channel in `OverallState`. How can we write out to a state channel that is not included in the input schema? This is because a node *can write to any state channel in the graph state.* The graph state is the union of the state channels defined at initialization, which includes `OverallState` and the filters `InputState` and `OutputState`.
-
-2. We initialize the graph with:
-
-   ```python  theme={null}
-   StateGraph(
-       OverallState,
-       input_schema=InputState,
-       output_schema=OutputState
-   )
-   ```
-
-   So, how can we write to `PrivateState` in `node_2`? How does the graph gain access to this schema if it was not passed in the `StateGraph` initialization?
-
-   We can do this because `_nodes` can also declare additional state `channels_` as long as the state schema definition exists. In this case, the `PrivateState` schema is defined, so we can add `bar` as a new state channel in the graph and write to it.
+- **Nodes can write to any channel** in the graph state, not just those in their input schema. The graph state is the union of all defined schemas (`OverallState`, `InputState`, `OutputState`).
+- **Nodes can declare new channels** by returning types defined elsewhere (like `PrivateState`), even if those weren't passed to `StateGraph`. As long as the schema definition exists, nodes can write to it.
+</Note>
 
 ### Reducers
 
@@ -142,7 +137,7 @@ class State(TypedDict):
 
 In this example, no reducer functions are specified for any key. Let's assume the input to the graph is:
 
-`{"foo": 1, "bar": ["hi"]}`. Let's then assume the first `Node` returns `{"foo": 2}`. This is treated as an update to the state. Notice that the `Node` does not need to return the whole `State` schema - just an update. After applying this update, the `State` would then be `{"foo": 2, "bar": ["hi"]}`. If the second node returns `{"bar": ["bye"]}` then the `State` would then be `{"foo": 2, "bar": ["bye"]}`
+`{"foo": 1, "bar": ["hi"]}`. Let's then assume the first node returns `{"foo": 2}`. This is treated as an update to the state. Notice that the node does not need to return the whole `State` schema—just an update. After applying this update, the state becomes `{"foo": 2, "bar": ["hi"]}`. If the second node returns `{"bar": ["bye"]}`, the state becomes `{"foo": 2, "bar": ["bye"]}`.
 
 ```python Example B theme={null}
 from typing import Annotated
@@ -172,7 +167,7 @@ To read more about what message objects are, please refer to the [Messages conce
 
 #### Using messages in your graph
 
-In many cases, it is helpful to store prior conversation history as a list of messages in your graph state. To do so, we can add a key (channel) to the graph state that stores a list of `Message` objects and annotate it with a reducer function (see `messages` key in the example below). The reducer function is vital to telling the graph how to update the list of `Message` objects in the state with each state update (for example, when a node sends an update). If you don't specify a reducer, every state update will overwrite the list of messages with the most recently provided value. If you wanted to simply append messages to the existing list, you could use `operator.add` as a reducer.
+In many cases, it is helpful to store prior conversation history as a list of messages in your graph state. To do so, we can add a key (channel) to the graph state that stores a list of `Message` objects and annotate it with a reducer function (see `messages` key in the example below). The reducer function is vital to telling the graph how to update the list of `Message` objects in the state with each state update (for example, when a node sends an update). Without a reducer, each update replaces the entire list (default last-value-wins behavior). If you wanted to simply append messages to the existing list, you could use `operator.add` as a reducer.
 
 However, you might also want to manually update messages in your graph state (e.g. human-in-the-loop). If you were to use `operator.add`, the manual state updates you send to the graph would be appended to the existing list of messages, instead of updating existing messages. To avoid that, you need a reducer that can keep track of message IDs and overwrite existing messages, if updated. To achieve this, you can use the prebuilt [`add_messages`](https://reference.langchain.com/python/langgraph/graphs/#langgraph.graph.message.add_messages) function. For brand new messages, it will simply append to existing list, but it will also handle the updates for existing messages correctly.
 
@@ -261,7 +256,7 @@ builder.add_node("node_with_config", node_with_config)
 ...
 ```
 
-Behind the scenes, functions are converted to [`RunnableLambda`](https://reference.langchain.com/python/langchain_core/runnables/#langchain_core.runnables.base.RunnableLambda), which add batch and async support to your function, along with native tracing and debugging.
+Behind the scenes, functions are converted to a [`RunnableLambda`](https://reference.langchain.com/python/langchain_core/runnables/#langchain_core.runnables.base.RunnableLambda), which adds batch and async support along with native tracing and debugging.
 
 If you add a node to a graph without specifying a name, it will be given a default name equivalent to the function name.
 
@@ -282,7 +277,7 @@ graph.add_edge(START, "node_a")
 
 ### `END` node
 
-The `END` Node is a special node that represents a terminal node. This node is referenced when you want to denote which edges have no actions after they are done.
+The `END` node is a special marker indicating the graph should terminate after reaching it. Reference this node when an edge should lead to graph completion.
 
 ```python  theme={null}
 from langgraph.graph import END
@@ -347,7 +342,7 @@ Edges define how the logic is routed and how the graph decides to stop. This is 
 * Entry Point: Which node to call first when user input arrives.
 * Conditional Entry Point: Call a function to determine which node(s) to call first when user input arrives.
 
-A node can have multiple outgoing edges. If a node has multiple outgoing edges, **all** of those destination nodes will be executed in parallel as a part of the next superstep.
+A node can have multiple outgoing edges; if so, **all** destination nodes execute in parallel in the next superstep.
 
 ### Normal edges
 
@@ -440,20 +435,9 @@ def my_node(state: State) -> Command[Literal["my_other_node"]]:
         return Command(update={"foo": "baz"}, goto="my_other_node")
 ```
 
-Note that [`Command`](https://reference.langchain.com/python/langgraph/types/#langgraph.types.Command) only adds dynamic edges, while static edges will still execute. In other words, [`Command`](https://reference.langchain.com/python/langgraph/types/#langgraph.types.Command) doesn't override static edges.
-
-```python  theme={null}
-def node_a(state: State) -> Command[Literal["my_other_node"]]:
-   if state["foo"] == "bar":
-       return Command(update={"foo": "baz"}, goto="my_other_node")
-
-# Add a static edge from "node_a" to "node_b"
-graph.add_edge("node_a", "node_b")
-
-# Command will NOT prevent "node_a" from going to "node_b"
-```
-
-In the example above, **"node\_a"** will go to both **"node\_b"** and **"my\_other\_node"**.
+<Warning>
+`Command` **adds** dynamic edges but does not override static edges. If `node_a` has a static edge to `node_b` and returns `Command(goto="node_c")`, both `node_b` and `node_c` will execute.
+</Warning>
 
 <Note>
   When returning [`Command`](https://reference.langchain.com/python/langgraph/types/#langgraph.types.Command) in your node functions, you must add return type annotations with the list of node names the node is routing to, e.g. `Command[Literal["my_other_node"]]`. This is necessary for the graph rendering and tells LangGraph that `my_node` can navigate to `my_other_node`.
@@ -542,7 +526,7 @@ See [this guide](/oss/python/langgraph/use-graph-api#add-runtime-configuration) 
 
 ### Recursion limit
 
-The recursion limit sets the maximum number of [super-steps](#graphs) the graph can execute during a single execution. Once the limit is reached, LangGraph will raise `GraphRecursionError`. Starting in version 1.0.6, the deafult recursion limit is set to 1000 steps. The recursion limit can be set on any graph at runtime, and is passed to `invoke`/`stream` via the config dictionary. Importantly, `recursion_limit` is a standalone `config` key and should not be passed inside the `configurable` key as all other user-defined configuration. See the example below:
+The recursion limit sets the maximum number of [super-steps](#graphs) the graph can execute during a single execution. Once the limit is reached, LangGraph will raise `GraphRecursionError`. Starting in version 1.0.6, the default recursion limit is 1000 steps. The recursion limit can be set on any graph at runtime, and is passed to `invoke`/`stream` via the config dictionary. Importantly, `recursion_limit` is a standalone `config` key and should not be passed inside the `configurable` key as all other user-defined configuration. See the example below:
 
 ```python  theme={null}
 graph.invoke(inputs, config={"recursion_limit": 5}, context={"llm": "anthropic"})
@@ -556,7 +540,7 @@ The current step counter is accessible in `config["metadata"]["langgraph_step"]`
 
 #### How it works
 
-The step counter is stored in `config["metadata"]["langgraph_step"]`. The recursion limit check follows the logic: `step > stop` where `stop = step + recursion_limit + 1`. When the limit is exceeded, LangGraph raises a `GraphRecursionError`.
+The step counter is stored in `config["metadata"]["langgraph_step"]`. Execution halts when the step count exceeds the configured `recursion_limit`, raising a `GraphRecursionError`.
 
 #### Accessing the current step counter
 
@@ -710,7 +694,7 @@ def inspect_metadata(state: dict, config: RunnableConfig) -> dict:
 
 ## Visualization
 
-It's often nice to be able to visualize graphs, especially as they get more complex. LangGraph comes with several built-in ways to visualize graphs. See [this how-to guide](/oss/python/langgraph/use-graph-api#visualize-your-graph) for more info.
+Visualizing graphs is useful as they grow in complexity. LangGraph provides several built-in visualization methods. See [this how-to guide](/oss/python/langgraph/use-graph-api#visualize-your-graph) for more info.
 
 ***
 
